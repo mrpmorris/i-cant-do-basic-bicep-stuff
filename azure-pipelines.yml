@@ -1,0 +1,89 @@
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-22.04
+
+variables:
+  environmentCode: 'dev'
+  resourceGroupName: 'myapp-$(environmentCode)-$(shortLocationCode)'
+  buildConfiguration: 'Release'
+  disable.coverage.autogenerate: 'true'
+  codecoveragehistory.directory: '$(Build.ArtifactStagingDirectory)/history'
+  codecoveragehistory.feedName: $[lower(format('{0}-{1}', variables['Build.Repository.Name'], variables['Build.SourceBranchName']))]
+
+steps:
+  - script: |
+      echo "location: $(location)"
+      if [ "$(location)" == "uksouth" ]; then
+        echo "##vso[task.setvariable variable=shortLocationCode]uks"
+      elif [ "$(location)" == "ukwest" ]; then
+        echo "##vso[task.setvariable variable=shortLocationCode]ukw"
+      else
+        echo "##vso[task.logissue type=error]Unsupported location: $(location)"
+        exit 1
+      fi
+    displayName: 'Check location'
+
+  - task: gitversion/setup@0
+    displayName: "Setup GitVersion"
+    inputs:
+      versionSpec: '5.x'
+
+  - task: gitversion/execute@0
+    displayName: 'GitVersion: Run'
+    inputs:
+      additionalArguments: '/updateprojectfiles'
+
+
+  - task: NuGetAuthenticate@1
+    displayName: 'NuGet: Authenticate'
+
+  - script: |
+      dotnet tool install --global dotnet-sdk-check
+      dotnet sdk check
+      dotnet workload install aspire
+    displayName: 'Workload: Aspire'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Source: Restore dependencies'
+    inputs:
+      command: 'restore'
+      projects: '**/*.sln'
+      feedsToUse: 'select'
+      vstsFeed: '{my private feed guid}'
+      verbosityRestore: 'Normal'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Source: Build'
+    inputs:
+      command: 'build'
+      projects: '**/*.sln'
+      arguments: '-c $(buildConfiguration) /p:TreatWarningsAsErrors=True --no-restore'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Telegram functions: Publish'
+    inputs:
+      command: 'publish'
+      publishWebProjects: false
+      projects: "Source/TelegramSystem/TelegramSystem.Functions/TelegramSystem.Functions.csproj"
+      arguments: '--configuration Release --output $(Build.ArtifactStagingDirectory) --runtime linux-x64'
+      zipAfterPublish: false
+      modifyOutputPath: false
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Artifacts: Publish"
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+      ArtifactName: 'drop'
+      publishLocation: 'Container'
+
+    - task: AzureFunctionApp@2
+    displayName: "Telegram functions: Deploy"
+    inputs:
+      connectedServiceNameARM: 'MyApp({my secret guid}})'
+      appType: 'functionAppLinux'
+      appName: 'myapp-$(environmentCode)-$(shortLocationCode)-telegram'
+      package: '$(Build.ArtifactStagingDirectory)'
+      runtimeStack: 'DOTNET-ISOLATED|8.0'
+      deploymentMethod: 'auto'
